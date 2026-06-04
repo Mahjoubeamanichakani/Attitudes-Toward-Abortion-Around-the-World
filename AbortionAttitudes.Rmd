@@ -1,0 +1,671 @@
+---
+title: "Abortion Attitudes"
+author: "Mahjoube AmaniChakani"
+date: "2025-04-16"
+output:
+  html_document: default
+  pdf_document: default
+  word_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+options(mc.cores = parallel::detectCores())
+# load packages
+library(rethinking)
+library(brms)
+library(lme4)
+library(rmarkdown)
+library(dplyr)
+library(tidyverse)
+library(labelled)
+library(parameters)
+library(mice)
+library(tidyr)
+library(viridis)
+```
+
+
+The data is online, and can be loaded using:
+
+```{r data}
+data <- read.csv('D:/scond year/QUANT/Project/data 7th/F00011356-WVS_Cross-National_Wave_7_csv_v6_0/WVS_Cross-National_Wave_7_csv_v6_0.csv')
+head(data$incomeWB)
+dim(data)
+summary(data[c('Q184','I_ABORTLIB','Q262','Q261', 'Q260', 'incomeWB', 'Q273', 'H_URBRURAL', 'GII', 'Q37', 'Q50', 'Q274' )])
+
+
+```
+
+
+```{r missing values}
+
+ab_data <- data %>%
+  select(
+    abortion_justif = Q184,        # 1–10
+    age = Q262,                    # continuous
+    sex = Q260,                    # 1 = Male, 2 = Female
+    marital_status = Q273,         # 1–6
+    urban_rural = H_URBRURAL,      # 1 = Urban, 2 = Rural
+    duty_children = Q37,           # 1 = Strongly agree ... 5 = Strongly disagree
+    fin_satisfaction = Q50,        # 1 = Dissatisfied ... 10 = Satisfied
+    country = incomeWB,            # factor: Low, lower-middle, upper-middle, high
+    GII = GII                      # continuous: 0–1
+  ) %>%
+  mutate(
+    # Handle missing values for abortion attitudes
+    abortion_justif = ifelse(abortion_justif %in% c(-5, -4, -2, -1), NA, abortion_justif),
+
+    # Continuous predictors
+    age = ifelse(age <= 0, NA, age),
+    GII = ifelse(GII <= 0 | GII < -999, NA, GII),
+
+    # Monotonic ordinal predictors (numeric, not factor)
+    duty_children = ifelse(duty_children %in% c(-5, -4, -2, -1), NA, as.integer(duty_children)),
+    fin_satisfaction = ifelse(fin_satisfaction %in% c(-5, -4, -2, -1), NA, as.integer(fin_satisfaction)),
+
+  
+    sex = factor(sex, levels = c(1,2), labels = c("Male", "Female")),
+    marital_status = factor(marital_status),
+    urban_rural = factor(urban_rural, levels = c(1,2), labels = c("Urban", "Rural")),
+    country = factor(country)
+
+  )
+
+
+
+
+
+dropMissing_data <- ab_data[complete.cases(ab_data),]
+
+head(dropMissing_data)
+
+sum(is.na(dropMissing_data$abortion_justif))
+
+
+summary(dropMissing_data$abortion_justif)
+table(dropMissing_data$abortion_justif, useNA = "ifany")
+
+
+```
+#distribution
+```{r dist table}
+install.packages("skimr")
+library(skimr)
+skim(dropMissing_data_c)
+table(dropMissing_data_c$age)
+
+dropMissing_data_c <- dropMissing_data_c %>%
+  mutate(age_group = cut(age,
+                         breaks = c(0, 29, 44, 59, 100),
+                         labels = c("18–29", "30–44", "45–59", "60+")))
+dropMissing_data_c %>%
+  count(age_group) %>%
+  mutate(percent = n / sum(n) * 100)
+
+
+dropMissing_data_c %>%
+  count(sex) %>%
+  mutate(percent = n / sum(n) * 100)
+
+dropMissing_data_c %>%
+  count(marital_status) %>%
+  mutate(percent = n / sum(n) * 100)
+
+dropMissing_data_c %>%
+  count(urban_rural) %>%
+  mutate(percent = n / sum(n) * 100)
+
+dropMissing_data_c %>%
+  count(duty_children) %>%
+  mutate(percent = n / sum(n) * 100)
+
+
+dropMissing_data_c %>%
+  count(fin_satisfaction) %>%
+  mutate(percent = n / sum(n) * 100)
+
+
+```
+
+
+#First part: abortion at in 10 categories
+
+```{r initial graph}
+simplehist(dropMissing_data$abortion_justif, xlim=c(1,10), 
+           xlab="Attitudes toward abortion (1=Never justifiable, 5=neutral, 10=Always justifiable )")
+simplehist(ab_data$abortion_justif, xlim=c(1,10), 
+           xlab="Attitudes toward abortion (1=Never justifiable, 5=neutral, 10=Always justifiable )")
+pr_k <- table( dropMissing_data$abortion_justif ) / nrow(dropMissing_data)
+
+ 
+cum_pr_k <- cumsum( pr_k )  
+
+ 
+plot( 1:10 , cum_pr_k , type="b" , xlab="Attitudes toward abortion (1=Never justifiable, 5=neutral, 10=Always justifiable )" , ylab="cumulative proportion" , ylim=c(0,1) )
+logit <- function(x) log(x/(1-x)) 
+
+
+round( lco <- logit( cum_pr_k ) , 2 )
+
+```
+
+#brms app
+```{r prior_brms_1}
+model_abortion <- bf(
+  abortion_justif ~ mo(duty_children) + mo(fin_satisfaction) + age + sex + marital_status + urban_rural + GII + country,
+  family = cumulative()
+)
+
+
+get_prior(model_abortion, data = dropMissing_data)
+
+
+
+prior_abortion <- c(
+  prior(normal(0, 0.5), class = "b"),
+  prior(normal(0, 0.5), class = "Intercept")
+)
+
+
+
+
+prior_abortion
+
+```
+
+
+
+```{r model brms}
+
+fit_abortion <- brm(
+  formula = model_abortion,
+  data = dropMissing_data,
+  prior = prior_abortion,
+  chains = 2,
+  cores = 2,
+  seed = 123,
+  refresh = 0,
+  iter = 400,
+  warmup = 200,
+  thin = 2,            
+  threads = threading(4, grainsize = 100), 
+  algorithm = "meanfield"
+)
+
+
+summary(fit_abortion,prob=0.89)
+
+
+```
+```{r}
+fit_abortion %>% parameters( exponentiate = T, probs=0.95)
+
+```
+
+```{r pred_2}
+# To see what the model predicts, we can create a newdata frame.
+# For example, let’s compare predictions for different values of duty_children and fin_satisfaction.
+cases <- data.frame(
+  duty_children = c(1, 3, 5),
+  fin_satisfaction = c(1, 5, 10),
+  age = mean(dropMissing_data$age),
+  sex = 1,              # 1 = Male, 2 = Female
+  marital_status = 1,   # 1 Married
+  urban_rural = 1,      # 1 = Urban
+  GII = mean(dropMissing_data$GII),
+  country=1 #Low income
+)
+
+cases
+
+# Get predicted probabilities for each response category.
+pred_abortion <- predict(fit_abortion, newdata = cases)
+pred_abortion
+
+
+cbind(cases, pred_abortion)
+```
+
+
+These visualizations reflect predicted ordinal response probabilities using line and bar plots with uncertainty (where applicable), consistent with the original style and expectations for Lab 14.
+We can get the same thing with 90% credible intervals:
+
+```{r pred_hisp_men_viz2}
+gii_range <- seq(min(dropMissing_data$GII, na.rm = TRUE), 
+                 max(dropMissing_data$GII, na.rm = TRUE), 
+                 length.out = 1000)
+
+newdata <- data.frame(
+  duty_children = median(dropMissing_data$duty_children),
+  fin_satisfaction = median(dropMissing_data$fin_satisfaction),
+  age = mean(dropMissing_data$age),
+  sex = 1,
+  marital_status = 1,
+  urban_rural = 1,
+  GII = gii_range,
+  country = 1
+)
+
+pred_probs <- posterior_epred(fit_abortion, newdata = newdata)
+means <- apply(pred_probs, c(2, 3), mean)
+lbound <- apply(pred_probs, c(2, 3), quantile, probs = 0.11)
+ubound <- apply(pred_probs, c(2, 3), quantile, probs = 0.89)
+
+plot(NA, xlim=range(gii_range), ylim=c(0,1),
+     main="Predicted Abortion Justifiability by GII",
+     xlab="Gender Inequality Index", ylab="Predicted Probability")
+
+lines(gii_range, means[,1], lty=1)
+lines(gii_range, means[,2], lty=2)
+lines(gii_range, means[,3], lty=3)
+lines(gii_range, means[,4], lty=4)
+lines(gii_range, means[,5], lty=5)
+
+
+polygon(
+  x = c(gii_range,rev(gii_range)),
+  y = c(lbound[,1],rev(ubound[,1])),
+  col='#00000033', border=NA
+)
+
+polygon(
+  x = c(gii_range,rev(gii_range)),
+  y = c(lbound[,2],rev(ubound[,2])),
+  col='#00000033', border=NA
+)
+
+polygon(
+  x = c(gii_range,rev(gii_range)),
+  y = c(lbound[,3],rev(ubound[,3])),
+  col='#00000033', border=NA
+)
+
+polygon(
+  x = c(gii_range,rev(gii_range)),
+  y = c(lbound[,4],rev(ubound[,4])),
+  col='#00000033', border=NA
+)
+
+polygon(
+  x = c(gii_range,rev(gii_range)),
+  y = c(lbound[,5],rev(ubound[,5])),
+  col='#00000033', border=NA
+)
+
+polygon(
+  x = c(gii_range,rev(gii_range)),
+  y = c(lbound[,6],rev(ubound[,6])),
+  col='#00000033', border=NA
+)
+
+polygon(
+  x = c(gii_range,rev(gii_range)),
+  y = c(lbound[,7],rev(ubound[,7])),
+  col='#00000033', border=NA
+)
+
+polygon(
+  x = c(gii_range,rev(gii_range)),
+  y = c(lbound[,8],rev(ubound[,8])),
+  col='#00000033', border=NA
+)
+
+polygon(
+  x = c(gii_range,rev(gii_range)),
+  y = c(lbound[,9],rev(ubound[,9])),
+  col='#00000033', border=NA
+)
+
+polygon(
+  x = c(gii_range,rev(gii_range)),
+  y = c(lbound[,10],rev(ubound[,10])),
+  col='#00000033', border=NA
+)  
+legend("topleft", lty = 1:10, lwd = 2,
+       legend = c("1 = Never Justifiable", "2", "3", "4", "5 = Neutral",
+                  "6", "7", "8", "9", "10 = Always Justifiable"),
+       cex = 0.5)
+
+```
+```{r second graph:predict_and_visualize_gii_line_with_ci}
+
+gii_range <- seq(min(dropMissing_data$GII), max(dropMissing_data$GII), length.out = 100)
+dark <- "#23384F"
+palette_colors <- viridis(10)
+
+newdata_gii <- data.frame(
+  duty_children = median(dropMissing_data$duty_children),
+  fin_satisfaction = median(dropMissing_data$fin_satisfaction),
+  age = mean(dropMissing_data$age),
+  sex = 1,
+  marital_status = 1,
+  urban_rural = 1,
+  GII = gii_range,
+  country = 1
+)
+
+pred_probs_gii <- posterior_epred(fit_abortion, newdata = newdata_gii)
+means_gii <- apply(pred_probs_gii, c(2, 3), mean)
+lower_gii <- apply(pred_probs_gii, c(2,3), quantile, probs=0.11)
+upper_gii <- apply(pred_probs_gii, c(2,3), quantile, probs=0.89)
+
+plot(NA, xlim=range(gii_range), ylim=c(0,1),
+     main="Predicted Abortion Justifiability by GII",
+     xlab="Gender Inequality Index", ylab="Predicted Probability")
+
+for (k in 1:10) {
+  lines(gii_range, means_gii[,k], col=palette_colors[k], lwd=2)
+  polygon(c(gii_range, rev(gii_range)),
+          c(lower_gii[,k], rev(upper_gii[,k])),
+          col=adjustcolor(palette_colors[k], alpha.f=0.4), border=NA)
+}
+
+legend("topleft", lty=1, lwd=1, col=palette_colors, c("1 = Never Justifiable", "2", "3", "4", "5 = Neutral",
+                  "6", "7", "8", "9", "10 = Always Justifiable"), cex=0.5)
+
+
+```
+
+
+
+
+#Second part: abortion in 3 categories
+
+```{r recoding}
+dropMissing_data_c <- dropMissing_data %>%
+  mutate(abortion_justif_3cat = case_when(
+    abortion_justif %in% 1:3 ~ 1,  # Low justifiability
+    abortion_justif %in% 4:7 ~ 2,  # Neutral
+    abortion_justif %in% 8:10 ~ 3  # High justifiability
+  ))
+table(dropMissing_data_c$abortion_justif_3cat)
+
+```
+
+
+```{r initial graph new categories}
+simplehist(dropMissing_data_c$abortion_justif_3cat, xlim=c(1,3), 
+           xlab="Attitudes toward abortion (1=Never justifiable, 5=neutral, 10=Always justifiable )")
+simplehist(dropMissing_data_c$abortion_justif_3cat, xlim=c(1,3), 
+           xlab="Attitudes toward abortion (1=Never justifiable, 5=neutral, 10=Always justifiable )")
+
+
+```
+# Fit a new ordinal model using the recoded outcome
+
+```{r model cat, paged.print=TRUE}
+model_abortion_3cat <- bf(
+  abortion_justif_3cat ~ duty_children + fin_satisfaction + age + sex + marital_status + urban_rural + GII + country,
+  family = cumulative()
+)
+
+# Use the same priors
+fit_abortion_3cat <- brm(
+  formula = model_abortion_3cat,
+  data = dropMissing_data_c,
+  prior = prior_abortion,
+  chains = 4,
+  cores = 4,
+  seed = 123,
+  refresh = 0
+)
+
+summary(fit_abortion_3cat)
+
+```
+
+
+
+
+
+# Posterir prediction plot
+```{r cat}
+
+gii_range <- seq(min(dropMissing_data$GII, na.rm = TRUE), 
+                 max(dropMissing_data$GII, na.rm = TRUE), 
+                 length.out = 100)
+
+
+newdata_gii <- data.frame(
+  duty_children    = median(dropMissing_data$duty_children),
+  fin_satisfaction = median(dropMissing_data$fin_satisfaction),
+  age              = mean(dropMissing_data$age),
+  sex              = 1,
+  marital_status   = 1,
+  urban_rural      = 1,
+  GII              = gii_range,
+  country          = 1
+)
+
+
+pred_probs_gii_3cat <- posterior_epred(fit_abortion_3cat, newdata = newdata_gii)
+
+means_gii_3cat  <- apply(pred_probs_gii_3cat, c(2, 3), mean)
+lower_gii_3cat  <- apply(pred_probs_gii_3cat, c(2, 3), quantile, probs = 0.11)
+upper_gii_3cat  <- apply(pred_probs_gii_3cat, c(2, 3), quantile, probs = 0.89)
+
+cols <- c("darkred", "gray30", "darkgreen")
+
+# Plot setup
+plot(NA, xlim=range(gii_range), ylim=c(0,1),
+     main="Predicted Abortion Justifiability by GII (3 Categories)",
+     xlab="Gender Inequality Index", ylab="Predicted Probability")
+
+
+lines(gii_range, means_gii_3cat[,1], col=cols[1], lwd=2)
+polygon(c(gii_range, rev(gii_range)),
+        c(lower_gii_3cat[,1], rev(upper_gii_3cat[,1])),
+        col=adjustcolor(cols[1], alpha.f=0.25), border=NA)
+
+
+lines(gii_range, means_gii_3cat[,2], col=cols[2], lwd=2, lty=2)
+polygon(c(gii_range, rev(gii_range)),
+        c(lower_gii_3cat[,2], rev(upper_gii_3cat[,2])),
+        col=adjustcolor(cols[2], alpha.f=0.25), border=NA)
+
+
+lines(gii_range, means_gii_3cat[,3], col=cols[3], lwd=2, lty=3)
+polygon(c(gii_range, rev(gii_range)),
+        c(lower_gii_3cat[,3], rev(upper_gii_3cat[,3])),
+        col=adjustcolor(cols[3], alpha.f=0.25), border=NA)
+
+legend("topleft", lwd=2, lty=1:3, col=cols,
+       legend=c("Low Justifiability", "Neutral", "High Justifiability"),
+       cex=0.8)
+
+```
+# Visualization of Posterior Predictions
+
+# Updated Multilevel Model (Random Intercepts for Country)
+
+```{r fit_multilevel_model}
+# Updated model with random intercept for country
+model_abortion_multilevel <- bf(
+  abortion_justif ~ duty_children + fin_satisfaction + age + sex + marital_status + urban_rural + GII + (1 | country),
+  family = cumulative()
+)
+prior_abortion_multilevel <- c(
+  prior(normal(0, 2), class = "b"),
+  prior(normal(0, 5), class = "Intercept"),
+  prior(exponential(1), class = "sd", group = "country")
+)
+
+start_time <- Sys.time()
+
+
+fit_abortion_multilevel <- brm(
+  formula = model_abortion_multilevel,
+  data = dropMissing_data,
+  prior = prior_abortion_multilevel,
+  chains = 2,
+  cores = 2,
+  seed = 123,
+  iter = 800,
+  warmup = 200,
+  thin = 2,            
+  threads = threading(4, grainsize = 100), 
+  algorithm = "meanfield"
+)
+
+end_time <- Sys.time()
+end_time - start_time
+
+summary(fit_abortion_multilevel)
+plot(fit_abortion_multilevel, ask = FALSE)  # Check trace plots
+pp_check(fit_abortion_multilevel)  # Posterior predictive checks
+```
+
+### Posterior Prediction Plot for GII (with Random Intercepts)
+
+```{r predict_multilevel_gii}
+
+gii_range <- seq(
+  from = min(dropMissing_data$GII, na.rm = TRUE), 
+  to = max(dropMissing_data$GII, na.rm = TRUE), 
+  length.out = 1000
+)
+
+
+newdata <- data.frame(
+  duty_children    = median(dropMissing_data$duty_children, na.rm = TRUE),
+  fin_satisfaction = median(dropMissing_data$fin_satisfaction, na.rm = TRUE),
+  age              = mean(dropMissing_data$age, na.rm = TRUE),
+  sex              = 1,
+  marital_status   = 1,
+  urban_rural      = 1,
+  GII              = gii_range,
+  country          = 1  # reference country or average effect
+)
+
+
+pred_probs <- posterior_epred(fit_abortion_multilevel, newdata = newdata)
+
+
+means  <- apply(pred_probs, c(2, 3), mean)
+lbound <- apply(pred_probs, c(2, 3), quantile, probs = 0.11)
+ubound <- apply(pred_probs, c(2, 3), quantile, probs = 0.89)
+
+palette_colors <- RColorBrewer::brewer.pal(10, "RdYlBu")
+
+plot(
+  NA, xlim = range(gii_range), ylim = c(0, 1),
+  main = "Predicted Abortion Justifiability by GII (Multilevel Model)",
+  xlab = "Gender Inequality Index", ylab = "Predicted Probability"
+)
+
+
+for (k in 1:10) {
+  lines(gii_range, means[, k], col = palette_colors[k], lwd = 2)
+  polygon(
+    c(gii_range, rev(gii_range)),
+    c(lbound[, k], rev(ubound[, k])),
+    col = adjustcolor(palette_colors[k], alpha.f = 0.2),
+    border = NA
+  )
+}
+
+legend(
+  "topright", legend = paste("Score", 1:10),
+  col = palette_colors, lwd = 2, lty = 1, cex = 0.75,
+  title = "Justifiability", bty = "n"
+)
+
+```
+
+
+
+
+
+```{r 2}
+# Extract country-level intercepts
+posterior <- as_draws_df(fit_abortion_multilevel)
+ranefs <- posterior[, grepl("r_country\\[", names(posterior))]
+
+# Extract the names and reformat
+country_names <- gsub("r_country\\[|,Intercept\\]", "", colnames(ranefs))
+colnames(ranefs) <- country_names
+
+# Map country codes to income groups (make sure this exists in your data)
+country_income <- data.frame(
+  country = unique(country_names),
+  income_group = c("Low", "Low", "High", "High")  # edit to match your countries
+)
+
+# Split posterior draws into two lists
+low_income_draws <- ranefs[, country_income$country[country_income$income_group == "Low"]]
+high_income_draws <- ranefs[, country_income$country[country_income$income_group == "High"]]
+
+# Average across countries within group for each draw
+posterior_mu_low <- rowMeans(as.matrix(low_income_draws))
+posterior_mu_high <- rowMeans(as.matrix(high_income_draws))
+
+# Plot comparison
+xlim <- range(c(posterior_mu_low, posterior_mu_high))
+ylim <- c(0, max(density(posterior_mu_low)$y, density(posterior_mu_high)$y))
+
+plot(
+  density(posterior_mu_low), 
+  xlab = "Country-level intercept (latent scale)",
+  ylab = "Density",
+  xlim = xlim,
+  ylim = ylim,
+  main = "Posterior Distribution by Income Group",
+  lwd = 2,
+  col = "steelblue"
+)
+lines(density(posterior_mu_high), lty = 2, lwd = 2, col = "firebrick")
+
+legend(
+  "topleft",
+  legend = c("Low-income countries", "High-income countries"),
+  lty = c(1, 2),
+  lwd = 2,
+  col = c("steelblue", "firebrick"),
+  bty = "n"
+)
+```
+
+
+
+#3rd model
+```{r sloe random}
+model_random_slope <- bf(
+  abortion_justif ~ duty_children + fin_satisfaction + age + sex +
+    marital_status + urban_rural + GII + (1 + GII | country),
+  family = cumulative()
+)
+
+# Priors (you can keep them weakly informative)
+prior_random_slope <- c(
+  prior(normal(0, 2), class = "b"), 
+  prior(normal(0, 5), class = "Intercept"),  
+  prior(exponential(1), class = "sd", group = "country"),  
+  prior(lkj(2), class = "cor")  
+)
+
+# Fit with faster settings
+fit_random_slope <- brm(
+  formula = model_random_slope,
+  data = dropMissing_data,
+  prior = prior_random_slope,
+  chains = 2,
+  cores = 2,
+  seed = 123,
+  iter = 800,
+  warmup = 200,
+  thin = 2
+)
+```
+```{r}
+
+summary(fit_random_slope)
+
+
+fixef(fit_random_slope)
+
+
+
+
+
+```
